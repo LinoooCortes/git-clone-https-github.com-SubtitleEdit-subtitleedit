@@ -1761,31 +1761,69 @@ namespace Nikse.SubtitleEdit.Core.SubtitleFormats
                     endTime.TotalMilliseconds   = TimeCode.MaxTimeTotalMilliseconds;
                 }
 
+                // ── Continuation vs. multi-block detection ────────────────────────────
+                // Within a group that shares (SubtitleNumber, startMs, endMs), TTIs may be:
+                //   a) Continuation records — same VP + JC, text overflowed the 112-byte
+                //      TTI limit and was split across successive extension blocks.
+                //      → merge text into ONE SubtitleBlock.
+                //   b) Genuinely independent regions — different VP or JC (e.g. two
+                //      speakers at different screen positions).
+                //      → each distinct (VP, JC) pair becomes its own SubtitleBlock.
+                //
+                // Algorithm: merge TTI text into buckets keyed by (VP, JC), preserving
+                // the original file order of first appearance per bucket.
+                var blockOrder = new List<(byte vp, byte jc)>();
+                var blockText  = new Dictionary<(byte vp, byte jc), StringBuilder>();
+                foreach (var tti in group)
+                {
+                    var posKey = (tti.VerticalPosition, tti.JustificationCode);
+                    if (!blockText.TryGetValue(posKey, out var sb))
+                    {
+                        sb = new StringBuilder();
+                        blockText[posKey] = sb;
+                        blockOrder.Add(posKey);
+                    }
+                    else
+                    {
+                        // Continuation into the same visual region — append with a newline
+                        // only when the previous content doesn't already end on one.
+                        if (sb.Length > 0 && sb[sb.Length - 1] != '\n')
+                        {
+                            sb.AppendLine();
+                        }
+                    }
+                    sb.Append(HtmlUtil.FixInvalidItalicTags(tti.TextField));
+                }
+
                 Paragraph p;
-                if (group.Count == 1)
+                if (blockOrder.Count == 1)
                 {
                     // ── Legacy single-block path ───────────────────────────────────────
+                    // All TTIs in the group share the same position (pure continuation).
                     // Blocks stays null — all existing consumers of Paragraph.Text see
                     // exactly the same value they did before this change.
+                    var (vp, jc) = blockOrder[0];
+                    var mergedText = blockText[(vp, jc)].ToString();
                     p = new Paragraph
                     {
-                        Text      = HtmlUtil.FixInvalidItalicTags(first.TextField),
+                        Text      = mergedText,
                         StartTime = startTime,
                         EndTime   = endTime,
-                        Position  = JcAndVpToPosition(first.VerticalPosition, first.JustificationCode),
+                        Position  = JcAndVpToPosition(vp, jc),
                     };
                 }
                 else
                 {
                     // ── Multi-block path ──────────────────────────────────────────────
-                    // Each TTI becomes one SubtitleBlock.  Paragraph.Text is set to the
-                    // joined fallback so that legacy consumers still receive meaningful text.
-                    var blocks = new List<SubtitleBlock>(group.Count);
-                    foreach (var tti in group)
+                    // TTIs cover multiple distinct screen positions.  Each (VP, JC) bucket
+                    // becomes one SubtitleBlock.  Paragraph.Text is the newline-joined
+                    // fallback for legacy consumers.
+                    var blocks = new List<SubtitleBlock>(blockOrder.Count);
+                    foreach (var (vp, jc) in blockOrder)
                     {
                         blocks.Add(new SubtitleBlock(
-                            HtmlUtil.FixInvalidItalicTags(tti.TextField),
-                            JcAndVpToPosition(tti.VerticalPosition, tti.JustificationCode)));
+                            blockText[(vp, jc)].ToString(),
+                            JcAndVpToPosition(vp, jc)));
                     }
 
                     p = new Paragraph
