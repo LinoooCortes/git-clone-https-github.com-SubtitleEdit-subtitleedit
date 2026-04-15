@@ -1519,44 +1519,37 @@ namespace Nikse.SubtitleEdit.Core.SubtitleFormats
                 }
                 else
                 {
-                    if (text.StartsWith("{\\an7}", StringComparison.Ordinal) || text.StartsWith("{\\an8}", StringComparison.Ordinal) || text.StartsWith("{\\an9}", StringComparison.Ordinal))
+                    var anValue = GetAnTagValue(text);
+
+                    // VerticalPosition: top row=7/8/9, middle row=4/5/6, bottom row=everything else
+                    if (anValue is 7 or 8 or 9)
                     {
-                        tti.VerticalPosition = (byte)Configuration.Settings.SubtitleSettings.EbuStlMarginTop; // top (vertical)
+                        tti.VerticalPosition = (byte)Configuration.Settings.SubtitleSettings.EbuStlMarginTop; // top
                         if (header.DisplayStandardCode == "1" || header.DisplayStandardCode == "2") // teletext
                         {
                             tti.VerticalPosition++;
                         }
                     }
-                    else if (text.StartsWith("{\\an4}", StringComparison.Ordinal) || text.StartsWith("{\\an5}", StringComparison.Ordinal) || text.StartsWith("{\\an6}", StringComparison.Ordinal))
+                    else if (anValue is 4 or 5 or 6)
                     {
-                        tti.VerticalPosition = (byte)(rows / 2); // middle (vertical)
+                        tti.VerticalPosition = (byte)(rows / 2); // middle
                     }
                     else
                     {
                         var numberOfLineBreaks = Math.Max(0, Utilities.GetNumberOfLines(text) - 1);
-                        var startRow = rows - Configuration.Settings.SubtitleSettings.EbuStlMarginBottom -
-                                              numberOfLineBreaks * Configuration.Settings.SubtitleSettings.EbuStlNewLineRows;
-                        if (startRow < 0)
-                        {
-                            startRow = 0;
-                        }
-
-                        tti.VerticalPosition = (byte)startRow; // bottom (vertical)
+                        var startRow = rows - Configuration.Settings.SubtitleSettings.EbuStlMarginBottom
+                                             - numberOfLineBreaks * Configuration.Settings.SubtitleSettings.EbuStlNewLineRows;
+                        tti.VerticalPosition = (byte)Math.Max(0, startRow); // bottom
                     }
 
-                    tti.JustificationCode = EbuUiHelper.JustificationCode; // use default justification
-                    if (text.StartsWith("{\\an1}", StringComparison.Ordinal) || text.StartsWith("{\\an4}", StringComparison.Ordinal) || text.StartsWith("{\\an7}", StringComparison.Ordinal))
+                    // JustificationCode: left=1/4/7, right=3/6/9, centre=2/5/8, no tag=UI default
+                    tti.JustificationCode = anValue switch
                     {
-                        tti.JustificationCode = 1; // 01h=left-justified text
-                    }
-                    else if (text.StartsWith("{\\an3}", StringComparison.Ordinal) || text.StartsWith("{\\an6}", StringComparison.Ordinal) || text.StartsWith("{\\an9}", StringComparison.Ordinal))
-                    {
-                        tti.JustificationCode = 3; // 03h=right-justified
-                    }
-                    else if (text.StartsWith("{\\an2}", StringComparison.Ordinal) || text.StartsWith("{\\an5}", StringComparison.Ordinal) || text.StartsWith("{\\an8}", StringComparison.Ordinal))
-                    {
-                        tti.JustificationCode = 2; // 02h=centred text
-                    }
+                        1 or 4 or 7 => 1,                        // 01h=left-justified
+                        3 or 6 or 9 => 3,                        // 03h=right-justified
+                        2 or 5 or 8 => 2,                        // 02h=centred
+                        _           => EbuUiHelper.JustificationCode, // no {\an} tag — use UI default
+                    };
                 }
 
                 // replace some unsupported characters
@@ -1608,6 +1601,15 @@ namespace Nikse.SubtitleEdit.Core.SubtitleFormats
             }
             return true;
         }
+
+        /// <summary>
+        /// Returns the numeric value (1–9) of a leading <c>{\anN}</c> alignment tag, or 0 when absent.
+        /// </summary>
+        private static int GetAnTagValue(string text) =>
+            text.Length >= 6 && text[0] == '{' && text[1] == '\\' && text[2] == 'a' && text[3] == 'n'
+                             && text[4] >= '1' && text[4] <= '9' && text[5] == '}'
+                ? text[4] - '0'
+                : 0;
 
         private static string AutoDetectLanguageCode(Subtitle subtitle)
         {
