@@ -1454,7 +1454,11 @@ namespace Nikse.SubtitleEdit.Core.SubtitleFormats
             }
 
             header.TotalNumberOfSubtitles = subtitle.Paragraphs.Count.ToString("D5"); // seems to be 1 higher than actual number of subtitles
-            header.TotalNumberOfTextAndTimingInformationBlocks = header.TotalNumberOfSubtitles;
+            // Count TTI records: multi-block paragraphs contribute one record per block;
+            // single-block paragraphs contribute one record (extension-overflow is handled
+            // inside GetBytes / GetBytesExtra and is not reflected here).
+            var totalTtiCount = subtitle.Paragraphs.Sum(p => p.Blocks != null && p.Blocks.Count > 0 ? p.Blocks.Count : 1);
+            header.TotalNumberOfTextAndTimingInformationBlocks = totalTtiCount.ToString("D5");
             header.TotalNumberOfSubtitleGroups = "001";
 
             var today = $"{DateTime.Now:yyMMdd}";
@@ -1483,8 +1487,6 @@ namespace Nikse.SubtitleEdit.Core.SubtitleFormats
             var subtitleNumber = 0;
             foreach (var p in subtitle.Paragraphs)
             {
-                var tti = new EbuTextTimingInformation();
-
                 if (!int.TryParse(header.MaximumNumberOfDisplayableRows, out var rows))
                 {
                     rows = 23;
@@ -1499,108 +1501,64 @@ namespace Nikse.SubtitleEdit.Core.SubtitleFormats
                     rows = 15;
                 }
 
-                var text = p.Text.Trim(Utilities.NewLineChars);
-                if (p.Position != null && !p.Position.IsEmpty)
+                if (p.Blocks != null && p.Blocks.Count > 0)
                 {
-                    // Structured position overrides {\an} tag-based detection.
-                    // LineIndex is 1-based (SubtitlePosition convention); VP is 0-based (EBU STL spec).
-                    // Subtract 1 and clamp to the valid STL range [0, 22].
-                    if (p.Position.LineIndex.HasValue)
+                    // ── Multi-block export ────────────────────────────────────────────────────────────────────
+                    // Each SubtitleBlock in Paragraph.Blocks becomes one TTI record.
+                    // All records share the same SubtitleNumber, StartTime, and EndTime.
+                    // VP and JC are resolved per block from block.Position, falling back
+                    // to Paragraph.Position, then to format defaults.
+                    foreach (var block in p.Blocks)
                     {
-                        tti.VerticalPosition = (byte)Math.Clamp(p.Position.LineIndex.Value - 1, 0, 22);
-                    }
+                        var blockPos = (block.Position != null && !block.Position.IsEmpty)
+                            ? block.Position
+                            : p.Position;
 
-                    // SubtitleHorizontalAlignment enum values mirror JC byte codes directly
-                    // (Left=1, Center=2, Right=3), so no translation table is needed.
-                    // Fall back to the UI default when only LineIndex was stored without alignment.
-                    tti.JustificationCode = p.Position.HorizontalAlignment.HasValue
-                        ? (byte)(int)p.Position.HorizontalAlignment.Value
-                        : EbuUiHelper.JustificationCode;
-                }
-                else
-                {
-                    var anValue = GetAnTagValue(text);
+                        var tti = new EbuTextTimingInformation();
+                        var (vp, jc) = ResolveVpJc(blockPos, block.Text, header, rows);
+                        tti.VerticalPosition  = vp;
+                        tti.JustificationCode = jc;
 
-                    // VerticalPosition: top row=7/8/9, middle row=4/5/6, bottom row=everything else
-                    if (anValue is 7 or 8 or 9)
-                    {
-                        tti.VerticalPosition = (byte)Configuration.Settings.SubtitleSettings.EbuStlMarginTop; // top
-                        if (header.DisplayStandardCode == "1" || header.DisplayStandardCode == "2") // teletext
+                        var blockText = CleanTextForEbu(block.Text.Trim(Utilities.NewLineChars));
+                        tti.SubtitleNumber = (ushort)subtitleNumber;
+                        tti.TextField = blockText;
+                        int startTag = tti.TextField.IndexOf('}');
+                        if (tti.TextField.StartsWith("{\\", StringComparison.Ordinal) && startTag > 0 && startTag < 10)
                         {
-                            tti.VerticalPosition++;
+                            tti.TextField = tti.TextField.Remove(0, startTag + 1);
                         }
+
+                        SetTtiTimeCodes(tti, p);
+                        WriteTtiToStream(tti, header, stream);
                     }
-                    else if (anValue is 4 or 5 or 6)
-                    {
-                        tti.VerticalPosition = (byte)(rows / 2); // middle
-                    }
-                    else
-                    {
-                        var numberOfLineBreaks = Math.Max(0, Utilities.GetNumberOfLines(text) - 1);
-                        var startRow = rows - Configuration.Settings.SubtitleSettings.EbuStlMarginBottom
-                                             - numberOfLineBreaks * Configuration.Settings.SubtitleSettings.EbuStlNewLineRows;
-                        tti.VerticalPosition = (byte)Math.Max(0, startRow); // bottom
-                    }
-
-                    // JustificationCode: left=1/4/7, right=3/6/9, centre=2/5/8, no tag=UI default
-                    tti.JustificationCode = anValue switch
-                    {
-                        1 or 4 or 7 => 1,                        // 01h=left-justified
-                        3 or 6 or 9 => 3,                        // 03h=right-justified
-                        2 or 5 or 8 => 2,                        // 02h=centred
-                        _           => EbuUiHelper.JustificationCode, // no {\an} tag — use UI default
-                    };
-                }
-
-                // replace some unsupported characters
-                text = text.Replace("„", "\""); // lower quote
-                text = text.Replace("‚", "'"); // lower apostrophe
-                text = text.Replace("’", "'"); // right single quotation mark
-                text = text.Replace("♫", "♪"); // only music single note supported
-                text = text.Replace("…", "..."); // fix Unicode ellipsis
-
-                tti.SubtitleNumber = (ushort)subtitleNumber;
-                tti.TextField = text;
-                int startTag = tti.TextField.IndexOf('}');
-                if (tti.TextField.StartsWith("{\\", StringComparison.Ordinal) && startTag > 0 && startTag < 10)
-                {
-                    tti.TextField = tti.TextField.Remove(0, startTag + 1);
-                }
-
-                if (!p.StartTime.IsMaxTime)
-                {
-                    tti.TimeCodeInHours = p.StartTime.Hours;
-                    tti.TimeCodeInMinutes = p.StartTime.Minutes;
-                    tti.TimeCodeInSeconds = p.StartTime.Seconds;
-                    tti.TimeCodeInMilliseconds = p.StartTime.Milliseconds;
-                }
-
-                if (!p.EndTime.IsMaxTime)
-                {
-                    tti.TimeCodeOutHours = p.EndTime.Hours;
-                    tti.TimeCodeOutMinutes = p.EndTime.Minutes;
-                    tti.TimeCodeOutSeconds = p.EndTime.Seconds;
-                    tti.TimeCodeOutMilliseconds = p.EndTime.Milliseconds;
-                }
-
-                var extra = new MemoryStream();
-                buffer = tti.GetBytes(header, extra);
-                if (extra.Length > 0)
-                {
-                    buffer[3] = 0; // ExtensionBlockNumber 
-                    stream.Write(buffer, 0, buffer.Length);
-
-                    buffer = tti.GetBytesExtra(header, extra);
-                    stream.Write(buffer, 0, buffer.Length);
                 }
                 else
                 {
-                    stream.Write(buffer, 0, buffer.Length);
+                    // ── Legacy single-block export ──────────────────────────────────────────────────────────────────
+                    var text = p.Text.Trim(Utilities.NewLineChars);
+                    var tti = new EbuTextTimingInformation();
+                    var (vp, jc) = ResolveVpJc(p.Position, text, header, rows);
+                    tti.VerticalPosition  = vp;
+                    tti.JustificationCode = jc;
+
+                    text = CleanTextForEbu(text);
+                    tti.SubtitleNumber = (ushort)subtitleNumber;
+                    tti.TextField = text;
+                    int startTag = tti.TextField.IndexOf('}');
+                    if (tti.TextField.StartsWith("{\\", StringComparison.Ordinal) && startTag > 0 && startTag < 10)
+                    {
+                        tti.TextField = tti.TextField.Remove(0, startTag + 1);
+                    }
+
+                    SetTtiTimeCodes(tti, p);
+                    WriteTtiToStream(tti, header, stream);
                 }
+
                 subtitleNumber++;
             }
             return true;
         }
+
 
         /// <summary>
         /// Returns the numeric value (1–9) of a leading <c>{\anN}</c> alignment tag, or 0 when absent.
@@ -1610,6 +1568,128 @@ namespace Nikse.SubtitleEdit.Core.SubtitleFormats
                              && text[4] >= '1' && text[4] <= '9' && text[5] == '}'
                 ? text[4] - '0'
                 : 0;
+
+        /// <summary>
+        /// Resolves EBU STL VerticalPosition (VP) and JustificationCode (JC) bytes from a
+        /// structured <see cref="SubtitlePosition"/> (when present and non-empty) or by
+        /// inspecting the leading <c>{\anN}</c> alignment tag in <paramref name="text"/>.
+        /// </summary>
+        private static (byte vp, byte jc) ResolveVpJc(
+            SubtitlePosition? pos,
+            string text,
+            EbuGeneralSubtitleInformation header,
+            int rows)
+        {
+            if (pos != null && !pos.IsEmpty)
+            {
+                // Structured position overrides {\an} tag-based detection.
+                // LineIndex is 1-based (SubtitlePosition convention); VP is 0-based (EBU STL spec).
+                var vp = pos.LineIndex.HasValue
+                    ? (byte)Math.Clamp(pos.LineIndex.Value - 1, 0, 22)
+                    : (byte)0x16; // default: bottom row
+
+                // SubtitleHorizontalAlignment enum values mirror JC byte codes directly
+                // (Left=1, Center=2, Right=3), so no translation table is needed.
+                var jc = pos.HorizontalAlignment.HasValue
+                    ? (byte)(int)pos.HorizontalAlignment.Value
+                    : EbuUiHelper.JustificationCode;
+
+                return (vp, jc);
+            }
+            else
+            {
+                var anValue = GetAnTagValue(text);
+
+                // VerticalPosition: top row=7/8/9, middle row=4/5/6, bottom row=everything else
+                byte vp;
+                if (anValue is 7 or 8 or 9)
+                {
+                    vp = (byte)Configuration.Settings.SubtitleSettings.EbuStlMarginTop; // top
+                    if (header.DisplayStandardCode == "1" || header.DisplayStandardCode == "2") // teletext
+                    {
+                        vp++;
+                    }
+                }
+                else if (anValue is 4 or 5 or 6)
+                {
+                    vp = (byte)(rows / 2); // middle
+                }
+                else
+                {
+                    var numberOfLineBreaks = Math.Max(0, Utilities.GetNumberOfLines(text) - 1);
+                    var startRow = rows - Configuration.Settings.SubtitleSettings.EbuStlMarginBottom
+                                         - numberOfLineBreaks * Configuration.Settings.SubtitleSettings.EbuStlNewLineRows;
+                    vp = (byte)Math.Max(0, startRow); // bottom
+                }
+
+                // JustificationCode: left=1/4/7, right=3/6/9, centre=2/5/8, no tag=UI default
+                var jc = anValue switch
+                {
+                    1 or 4 or 7 => (byte)1,                         // 01h=left-justified
+                    3 or 6 or 9 => (byte)3,                         // 03h=right-justified
+                    2 or 5 or 8 => (byte)2,                         // 02h=centred
+                    _           => EbuUiHelper.JustificationCode,   // no {\an} tag — use UI default
+                };
+
+                return (vp, jc);
+            }
+        }
+
+        /// <summary>
+        /// Replaces characters unsupported by EBU STL in subtitle text.
+        /// </summary>
+        private static string CleanTextForEbu(string text) =>
+            text.Replace("\u201e", "\"")  // „ lower quote
+                .Replace("\u201a", "'")   // ‚ lower apostrophe
+                .Replace("\u2019", "'")   // ' right single quotation mark
+                .Replace("\u266b", "\u266a") // ♫ → ♪ only single music note supported
+                .Replace("\u2026", "..."); // … Unicode ellipsis
+
+        /// <summary>
+        /// Copies start/end timecode fields from <paramref name="p"/> into <paramref name="tti"/>.
+        /// </summary>
+        private static void SetTtiTimeCodes(EbuTextTimingInformation tti, Paragraph p)
+        {
+            if (!p.StartTime.IsMaxTime)
+            {
+                tti.TimeCodeInHours       = p.StartTime.Hours;
+                tti.TimeCodeInMinutes     = p.StartTime.Minutes;
+                tti.TimeCodeInSeconds     = p.StartTime.Seconds;
+                tti.TimeCodeInMilliseconds = p.StartTime.Milliseconds;
+            }
+
+            if (!p.EndTime.IsMaxTime)
+            {
+                tti.TimeCodeOutHours       = p.EndTime.Hours;
+                tti.TimeCodeOutMinutes     = p.EndTime.Minutes;
+                tti.TimeCodeOutSeconds     = p.EndTime.Seconds;
+                tti.TimeCodeOutMilliseconds = p.EndTime.Milliseconds;
+            }
+        }
+
+        /// <summary>
+        /// Serialises one TTI record (plus optional extension block) to <paramref name="stream"/>.
+        /// </summary>
+        private static void WriteTtiToStream(
+            EbuTextTimingInformation tti,
+            EbuGeneralSubtitleInformation header,
+            Stream stream)
+        {
+            var extra = new MemoryStream();
+            var buffer = tti.GetBytes(header, extra);
+            if (extra.Length > 0)
+            {
+                buffer[3] = 0; // ExtensionBlockNumber for the first record
+                stream.Write(buffer, 0, buffer.Length);
+
+                buffer = tti.GetBytesExtra(header, extra);
+                stream.Write(buffer, 0, buffer.Length);
+            }
+            else
+            {
+                stream.Write(buffer, 0, buffer.Length);
+            }
+        }
 
         private static string AutoDetectLanguageCode(Subtitle subtitle)
         {
