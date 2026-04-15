@@ -96,7 +96,7 @@ namespace Nikse.SubtitleEdit.Tests.Core.SubtitleFormats
         }
 
         [Fact]
-        public void NonEmptyPosition_TriggesStructuredPath()
+        public void NonEmptyPosition_TriggersStructuredPath()
         {
             // A position with at least one field set must NOT trigger the legacy path.
             var pos = new SubtitlePosition { LineIndex = 23 };
