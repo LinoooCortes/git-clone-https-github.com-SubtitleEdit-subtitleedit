@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using Nikse.SubtitleEdit.Core.Common.TextLengthCalculator;
 
 namespace Nikse.SubtitleEdit.Core.Common
@@ -55,6 +57,47 @@ namespace Nikse.SubtitleEdit.Core.Common
         /// </summary>
         public SubtitlePosition? Position { get; set; }
 
+        /// <summary>
+        /// Optional list of independent text blocks within this subtitle event.
+        /// <para>
+        /// When <c>null</c> (legacy mode) the subtitle is described entirely by
+        /// <see cref="Text"/> and <see cref="Position"/>, and all existing code
+        /// paths behave exactly as before — no migration or conversion is applied.
+        /// </para>
+        /// <para>
+        /// When non-null (multi-block mode) each <see cref="SubtitleBlock"/> carries
+        /// its own text and optional position, enabling multi-speaker / multi-region
+        /// events.  <see cref="Text"/> is then used only as a serialisation fallback
+        /// for formats that cannot express multiple blocks.
+        /// </para>
+        /// </summary>
+        public List<SubtitleBlock>? Blocks { get; set; }
+
+        /// <summary>
+        /// Returns the effective display text for this paragraph.
+        /// <list type="bullet">
+        ///   <item><description>
+        ///     Legacy mode (<see cref="Blocks"/> is <c>null</c>): returns <see cref="Text"/> unchanged.
+        ///   </description></item>
+        ///   <item><description>
+        ///     Multi-block mode (<see cref="Blocks"/> is non-null): joins every block's text
+        ///     with <see cref="Environment.NewLine"/> so callers that can only handle a
+        ///     single string still receive meaningful content.
+        ///   </description></item>
+        /// </list>
+        /// Existing code that reads <see cref="Text"/> directly is unaffected; this helper
+        /// is provided as a forward-compatible alternative for new code paths.
+        /// </summary>
+        public string GetEffectiveText()
+        {
+            if (Blocks == null)
+            {
+                return Text;
+            }
+
+            return string.Join(Environment.NewLine, Blocks.Select(b => b.Text));
+        }
+
         public bool IsDefault => Math.Abs(StartTime.TotalMilliseconds) < 0.01 && Math.Abs(EndTime.TotalMilliseconds) < 0.01 && string.IsNullOrEmpty(Text);
 
         private static string GenerateId()
@@ -96,6 +139,9 @@ namespace Nikse.SubtitleEdit.Core.Common
             NewSection = paragraph.NewSection;
             Bookmark = paragraph.Bookmark;
             Position = paragraph.Position == null ? null : new SubtitlePosition(paragraph.Position);
+            Blocks = paragraph.Blocks == null
+                ? null
+                : paragraph.Blocks.Select(b => new SubtitleBlock(b)).ToList();
         }
 
         public Paragraph(string text, double startTotalMilliseconds, double endTotalMilliseconds)
