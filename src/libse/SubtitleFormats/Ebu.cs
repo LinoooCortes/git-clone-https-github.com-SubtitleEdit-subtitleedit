@@ -1713,8 +1713,6 @@ namespace Nikse.SubtitleEdit.Core.SubtitleFormats
             subtitle.Paragraphs.Clear();
             var header = ReadHeader(buffer);
             subtitle.Header = header.ToString();
-            Paragraph last = null;
-            byte lastExtensionBlockNumber = 0xff;
             JustificationCodes = new List<int>();
             VerticalPositions = new List<int>();
             Configuration.Settings.General.CurrentFrameRate = header.FrameRate;
@@ -1723,38 +1721,86 @@ namespace Nikse.SubtitleEdit.Core.SubtitleFormats
                 Configuration.Settings.General.CurrentFrameRate = OverrideReadFrameRate;
             }
 
+            // Group TTI records by (SubtitleNumber, start-time-ms, end-time-ms).
+            // Multiple records with the same key are extension blocks (EBU STL spec §8.2)
+            // or genuinely distinct visual regions (multi-speaker).  Insertion order is
+            // preserved so that block order matches the file order.
+            var groups = new List<List<EbuTextTimingInformation>>();
+            var groupIndex = new Dictionary<(ushort subtitleNumber, long startMs, long endMs), int>();
+
             foreach (var tti in ReadTextAndTiming(buffer, header))
             {
-                if (tti.ExtensionBlockNumber != 0xfe) // FEh : Reserved for User Data
+                if (tti.ExtensionBlockNumber == 0xfe) // FEh : Reserved for User Data — skip
                 {
-                    var p = new Paragraph
-                    {
-                        Text = tti.TextField,
-                        StartTime = new TimeCode(tti.TimeCodeInHours, tti.TimeCodeInMinutes, tti.TimeCodeInSeconds, tti.TimeCodeInMilliseconds),
-                        EndTime = new TimeCode(tti.TimeCodeOutHours, tti.TimeCodeOutMinutes, tti.TimeCodeOutSeconds, tti.TimeCodeOutMilliseconds),
-                        Position = JcAndVpToPosition(tti.VerticalPosition, tti.JustificationCode)
-                    };
-
-                    if (Math.Abs(p.StartTime.TotalMilliseconds) < 0.01 && Math.Abs(p.EndTime.TotalMilliseconds) < 0.01)
-                    {
-                        p.StartTime.TotalMilliseconds = TimeCode.MaxTimeTotalMilliseconds;
-                        p.EndTime.TotalMilliseconds = TimeCode.MaxTimeTotalMilliseconds;
-                    }
-
-                    if (lastExtensionBlockNumber != 0xff && last != null)
-                    {
-                        last.Text += p.Text; // merge text
-                    }
-                    else
-                    {
-                        subtitle.Paragraphs.Add(p);
-                        last = p;
-                    }
-
-                    p.Text = HtmlUtil.FixInvalidItalicTags(p.Text);
-                    lastExtensionBlockNumber = tti.ExtensionBlockNumber;
+                    continue;
                 }
+
+                var startMs = (long)new TimeCode(tti.TimeCodeInHours, tti.TimeCodeInMinutes, tti.TimeCodeInSeconds, tti.TimeCodeInMilliseconds).TotalMilliseconds;
+                var endMs   = (long)new TimeCode(tti.TimeCodeOutHours, tti.TimeCodeOutMinutes, tti.TimeCodeOutSeconds, tti.TimeCodeOutMilliseconds).TotalMilliseconds;
+                var key = (tti.SubtitleNumber, startMs, endMs);
+
+                if (!groupIndex.TryGetValue(key, out var idx))
+                {
+                    idx = groups.Count;
+                    groups.Add(new List<EbuTextTimingInformation>());
+                    groupIndex[key] = idx;
+                }
+
+                groups[idx].Add(tti);
             }
+
+            foreach (var group in groups)
+            {
+                var first = group[0];
+                var startTime = new TimeCode(first.TimeCodeInHours, first.TimeCodeInMinutes, first.TimeCodeInSeconds, first.TimeCodeInMilliseconds);
+                var endTime   = new TimeCode(first.TimeCodeOutHours, first.TimeCodeOutMinutes, first.TimeCodeOutSeconds, first.TimeCodeOutMilliseconds);
+
+                if (Math.Abs(startTime.TotalMilliseconds) < 0.01 && Math.Abs(endTime.TotalMilliseconds) < 0.01)
+                {
+                    startTime.TotalMilliseconds = TimeCode.MaxTimeTotalMilliseconds;
+                    endTime.TotalMilliseconds   = TimeCode.MaxTimeTotalMilliseconds;
+                }
+
+                Paragraph p;
+                if (group.Count == 1)
+                {
+                    // ── Legacy single-block path ───────────────────────────────────────
+                    // Blocks stays null — all existing consumers of Paragraph.Text see
+                    // exactly the same value they did before this change.
+                    p = new Paragraph
+                    {
+                        Text      = HtmlUtil.FixInvalidItalicTags(first.TextField),
+                        StartTime = startTime,
+                        EndTime   = endTime,
+                        Position  = JcAndVpToPosition(first.VerticalPosition, first.JustificationCode),
+                    };
+                }
+                else
+                {
+                    // ── Multi-block path ──────────────────────────────────────────────
+                    // Each TTI becomes one SubtitleBlock.  Paragraph.Text is set to the
+                    // joined fallback so that legacy consumers still receive meaningful text.
+                    var blocks = new List<SubtitleBlock>(group.Count);
+                    foreach (var tti in group)
+                    {
+                        blocks.Add(new SubtitleBlock(
+                            HtmlUtil.FixInvalidItalicTags(tti.TextField),
+                            JcAndVpToPosition(tti.VerticalPosition, tti.JustificationCode)));
+                    }
+
+                    p = new Paragraph
+                    {
+                        Blocks    = blocks,
+                        Text      = string.Join(Environment.NewLine, blocks.Select(b => b.Text)),
+                        StartTime = startTime,
+                        EndTime   = endTime,
+                        Position  = blocks[0].Position, // primary position = first block
+                    };
+                }
+
+                subtitle.Paragraphs.Add(p);
+            }
+
             subtitle.Renumber();
             Header = header;
         }
