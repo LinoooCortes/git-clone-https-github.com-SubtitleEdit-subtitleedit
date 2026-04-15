@@ -8,8 +8,8 @@ namespace Nikse.SubtitleEdit.Tests.Core.SubtitleFormats
     /// Unit tests for the STL (EBU) import VP/JC → SubtitlePosition mapping introduced
     /// in Phase 3.
     ///
-    /// These tests use the <see cref="Ebu.JcAndVpToPosition"/> logic indirectly by
-    /// directly exercising the mapping rules described in the EBU STL spec:
+    /// These tests exercise the mapping rules indirectly (via LoadSubtitle) as
+    /// described in the EBU STL spec, since <see cref="Ebu.JcAndVpToPosition"/> is private:
     ///
     ///   VP (VerticalPosition) byte: 0-based row index.  LineIndex = VP + 1 (1-based).
     ///   JC (JustificationCode) byte:
