@@ -1500,43 +1500,63 @@ namespace Nikse.SubtitleEdit.Core.SubtitleFormats
                 }
 
                 var text = p.Text.Trim(Utilities.NewLineChars);
-                if (text.StartsWith("{\\an7}", StringComparison.Ordinal) || text.StartsWith("{\\an8}", StringComparison.Ordinal) || text.StartsWith("{\\an9}", StringComparison.Ordinal))
+                if (p.Position != null && !p.Position.IsEmpty)
                 {
-                    tti.VerticalPosition = (byte)Configuration.Settings.SubtitleSettings.EbuStlMarginTop; // top (vertical)
-                    if (header.DisplayStandardCode == "1" || header.DisplayStandardCode == "2") // teletext
+                    // Structured position overrides {\an} tag-based detection.
+                    // LineIndex is 1-based (SubtitlePosition convention); VP is 0-based (EBU STL spec).
+                    // Subtract 1 and clamp to the valid STL range [0, 22].
+                    if (p.Position.LineIndex.HasValue)
                     {
-                        tti.VerticalPosition++;
+                        tti.VerticalPosition = (byte)Math.Clamp(p.Position.LineIndex.Value - 1, 0, 22);
                     }
-                }
-                else if (text.StartsWith("{\\an4}", StringComparison.Ordinal) || text.StartsWith("{\\an5}", StringComparison.Ordinal) || text.StartsWith("{\\an6}", StringComparison.Ordinal))
-                {
-                    tti.VerticalPosition = (byte)(rows / 2); // middle (vertical)
+
+                    // SubtitleHorizontalAlignment enum values mirror JC byte codes directly
+                    // (Left=1, Center=2, Right=3), so no translation table is needed.
+                    // Fall back to the UI default when only LineIndex was stored without alignment.
+                    tti.JustificationCode = p.Position.HorizontalAlignment.HasValue
+                        ? (byte)(int)p.Position.HorizontalAlignment.Value
+                        : EbuUiHelper.JustificationCode;
                 }
                 else
                 {
-                    var numberOfLineBreaks = Math.Max(0, Utilities.GetNumberOfLines(text) - 1);
-                    var startRow = rows - Configuration.Settings.SubtitleSettings.EbuStlMarginBottom -
-                                          numberOfLineBreaks * Configuration.Settings.SubtitleSettings.EbuStlNewLineRows;
-                    if (startRow < 0)
+                    if (text.StartsWith("{\\an7}", StringComparison.Ordinal) || text.StartsWith("{\\an8}", StringComparison.Ordinal) || text.StartsWith("{\\an9}", StringComparison.Ordinal))
                     {
-                        startRow = 0;
+                        tti.VerticalPosition = (byte)Configuration.Settings.SubtitleSettings.EbuStlMarginTop; // top (vertical)
+                        if (header.DisplayStandardCode == "1" || header.DisplayStandardCode == "2") // teletext
+                        {
+                            tti.VerticalPosition++;
+                        }
+                    }
+                    else if (text.StartsWith("{\\an4}", StringComparison.Ordinal) || text.StartsWith("{\\an5}", StringComparison.Ordinal) || text.StartsWith("{\\an6}", StringComparison.Ordinal))
+                    {
+                        tti.VerticalPosition = (byte)(rows / 2); // middle (vertical)
+                    }
+                    else
+                    {
+                        var numberOfLineBreaks = Math.Max(0, Utilities.GetNumberOfLines(text) - 1);
+                        var startRow = rows - Configuration.Settings.SubtitleSettings.EbuStlMarginBottom -
+                                              numberOfLineBreaks * Configuration.Settings.SubtitleSettings.EbuStlNewLineRows;
+                        if (startRow < 0)
+                        {
+                            startRow = 0;
+                        }
+
+                        tti.VerticalPosition = (byte)startRow; // bottom (vertical)
                     }
 
-                    tti.VerticalPosition = (byte)startRow; // bottom (vertical)
-                }
-
-                tti.JustificationCode = EbuUiHelper.JustificationCode; // use default justification
-                if (text.StartsWith("{\\an1}", StringComparison.Ordinal) || text.StartsWith("{\\an4}", StringComparison.Ordinal) || text.StartsWith("{\\an7}", StringComparison.Ordinal))
-                {
-                    tti.JustificationCode = 1; // 01h=left-justified text
-                }
-                else if (text.StartsWith("{\\an3}", StringComparison.Ordinal) || text.StartsWith("{\\an6}", StringComparison.Ordinal) || text.StartsWith("{\\an9}", StringComparison.Ordinal))
-                {
-                    tti.JustificationCode = 3; // 03h=right-justified
-                }
-                else if (text.StartsWith("{\\an2}", StringComparison.Ordinal) || text.StartsWith("{\\an5}", StringComparison.Ordinal) || text.StartsWith("{\\an8}", StringComparison.Ordinal))
-                {
-                    tti.JustificationCode = 2; // 02h=centred text
+                    tti.JustificationCode = EbuUiHelper.JustificationCode; // use default justification
+                    if (text.StartsWith("{\\an1}", StringComparison.Ordinal) || text.StartsWith("{\\an4}", StringComparison.Ordinal) || text.StartsWith("{\\an7}", StringComparison.Ordinal))
+                    {
+                        tti.JustificationCode = 1; // 01h=left-justified text
+                    }
+                    else if (text.StartsWith("{\\an3}", StringComparison.Ordinal) || text.StartsWith("{\\an6}", StringComparison.Ordinal) || text.StartsWith("{\\an9}", StringComparison.Ordinal))
+                    {
+                        tti.JustificationCode = 3; // 03h=right-justified
+                    }
+                    else if (text.StartsWith("{\\an2}", StringComparison.Ordinal) || text.StartsWith("{\\an5}", StringComparison.Ordinal) || text.StartsWith("{\\an8}", StringComparison.Ordinal))
+                    {
+                        tti.JustificationCode = 2; // 02h=centred text
+                    }
                 }
 
                 // replace some unsupported characters
